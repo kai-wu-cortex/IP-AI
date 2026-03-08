@@ -1,0 +1,102 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (matches request.auth.uid)
+    // Fields:
+    //   - uid: string (required, immutable) - The user's UID
+    //   - email: string (required, immutable) - The user's email
+    //   - displayName: string (optional) - The user's display name
+    //   - photoURL: string (optional) - The user's photo URL
+    //   - slaLevel: string (required) - 'free', 'pro', or 'enterprise'
+    //   - createdAt: timestamp (required, immutable) - Creation time
+    //   - lastLoginAt: timestamp (optional) - Last login time
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user owns the resource (for user-owned documents)
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Verify UID hasn't been tampered with on create
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == request.auth.uid;
+    }
+
+    // Ensure uid field is not modified on update
+    function uidNotModified() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == resource.data.uid;
+    }
+
+    // Validate required fields exist
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    // Validate that the document contains only the allowed fields
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate email format
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Validate SLA Level
+    function isValidSlaLevel(level) {
+      return level in ['free', 'pro', 'enterprise'];
+    }
+
+    // Domain Validator for User
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'email', 'slaLevel', 'createdAt']) &&
+             data.uid is string &&
+             data.email is string && isValidEmail(data.email) &&
+             data.slaLevel is string && isValidSlaLevel(data.slaLevel) &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Allow read if the user is the owner
+      allow read: if isOwner(userId);
+
+      // Allow create if authenticated and valid user data
+      // Users can create their own profile, but SLA level defaults to 'free' unless admin (for simplicity, we allow 'free' on create)
+      allow create: if isOwner(userId) && 
+                       isValidUser(request.resource.data) &&
+                       request.resource.data.uid == userId &&
+                       request.resource.data.slaLevel == 'free'; 
+
+      // Allow update if owner
+      // Prevent changing SLA level (must be done by admin or backend process - for now, we lock it)
+      allow update: if isOwner(userId) && 
+                       isValidUser(request.resource.data) &&
+                       uidNotModified() &&
+                       request.resource.data.slaLevel == resource.data.slaLevel &&
+                       request.resource.data.createdAt == resource.data.createdAt;
+    }
+  }
+}
